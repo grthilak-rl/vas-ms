@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest:*)",
+      "Bash(python3 -m pytest:*)",
+      "Bash(find:*)",
+      "Bash(curl:*)",
+      "Bash(lsof:*)",
+      "Bash(ss:*)",
+      "Bash(ufw status:*)",
+      "Bash(iptables:*)",
+      "Bash(timeout 5 ffmpeg:*)",
+      "Bash(timeout 10 ffmpeg:*)",
+      "Bash(cat:*)",
+      "Bash(kill:*)",
+      "Bash(python3:*)",
+      "Bash(xargs:*)",
+      "Bash(PGPASSWORD=vas_password psql:*)",
+      "Bash(source venv/bin/activate)",
+      "Bash(python /tmp/fix_device_state.py:*)",
+      "Bash(alembic revision:*)",
+      "Bash(alembic upgrade:*)",
+      "Bash(python create_snapshots_table.py:*)",
+      "Bash(python /tmp/recreate_snapshots_table.py:*)",
+      "Bash(python:*)",
+      "Bash(time curl:*)",
+      "Bash(docker logs:*)",
+      "Bash(netstat:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker restart:*)",
+      "Bash(sort:*)",
+      "Bash(sed:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
