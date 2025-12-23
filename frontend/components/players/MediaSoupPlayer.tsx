@@ -35,6 +35,32 @@ export default function MediaSoupPlayer({
     }
   };
 
+  // Cleanup effect when shouldConnect changes to false
+  useEffect(() => {
+    if (!shouldConnect) {
+      // Clean up existing connections when stream is stopped
+      consumersRef.current.forEach(consumer => consumer.close());
+      consumersRef.current = [];
+
+      if (transportRef.current) {
+        transportRef.current.close();
+        transportRef.current = null;
+      }
+
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+
+      setStatus('Ready to start stream');
+      setError(null);
+    }
+  }, [shouldConnect]);
+
   useEffect(() => {
     // Only connect when shouldConnect is true
     if (!shouldConnect) {

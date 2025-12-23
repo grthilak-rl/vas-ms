@@ -44,7 +44,18 @@
       "Bash(MEDIASOUP_WORKER_OPTIONS='{}' docker-compose:*)",
       "Bash(sudo ufw status:*)",
       "Bash(ip addr:*)",
-      "Bash(sudo iptables:*)"
+      "Bash(sudo iptables:*)",
+      "Bash(git checkout:*)",
+      "Bash(chmod:*)",
+      "Bash(docker stats:*)",
+      "Bash(ping:*)",
+      "Bash(docker inspect:*)",
+      "Bash(timeout 5 tcpdump:*)",
+      "Bash(git log:*)",
+      "Bash(docker top:*)",
+      "Bash(timeout 3 strace:*)",
+      "Bash(timeout 10 tcpdump:*)",
+      "Bash(timeout 5 curl:*)"
     ],
     "deny": [],
     "ask": []

@@ -105,12 +105,37 @@ async def start_device_stream(
     # Start RTSP → MediaSoup pipeline
     try:
         room_id = str(device_id)
-        
-        # 0. CLEANUP: Stop any existing stream for this device first
-        # This prevents multiple producers from accumulating
+
+        # 0. CHECK: If stream is already active, return existing stream info instead of restarting
+        # This prevents disrupting active streams when Ruth AI or VAS portal reconnects
         if room_id in rtsp_pipeline.active_streams:
-            logger.info(f"Stopping existing stream for device {device_id} before starting new one")
-            await rtsp_pipeline.stop_stream(room_id)
+            logger.info(f"Stream already active for device {device_id}, returning existing stream info")
+            stream_info = rtsp_pipeline.active_streams[room_id]
+
+            # Get existing producers for this room
+            try:
+                existing_producers = await mediasoup_client.get_producers(room_id)
+                if existing_producers:
+                    # Return info about existing stream
+                    return {
+                        "status": "success",
+                        "device_id": str(device_id),
+                        "room_id": room_id,
+                        "transport_id": stream_info.get("transport_id", "unknown"),
+                        "producers": {
+                            "video": existing_producers[-1] if existing_producers else "unknown"
+                        },
+                        "stream": {
+                            "status": "active",
+                            "message": "Stream already running",
+                            "started_at": stream_info.get("started_at")
+                        },
+                        "reconnect": True  # Flag indicating this was a reconnect, not a new stream
+                    }
+            except Exception as e:
+                logger.warning(f"Error getting existing producers, will restart stream: {e}")
+                # If we can't get producer info, fall through to restart the stream
+                await rtsp_pipeline.stop_stream(room_id)
         
         # Also kill any orphaned FFmpeg processes for this RTSP URL as a safety measure
         import subprocess
@@ -200,6 +225,20 @@ async def start_device_stream(
             "encodings": [{"ssrc": detected_ssrc}]  # Use captured SSRC - REQUIRED for PlainRtpTransport
         }
 
+        # Close any old producers for this room to prevent accumulation
+        try:
+            old_producers = await mediasoup_client.get_producers(room_id)
+            if old_producers:
+                logger.info(f"Found {len(old_producers)} old producer(s) for room {room_id}, cleaning up...")
+                for old_producer_id in old_producers:
+                    try:
+                        await mediasoup_client.close_producer(old_producer_id)
+                        logger.info(f"Closed old producer: {old_producer_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to close old producer {old_producer_id}: {e}")
+        except Exception as e:
+            logger.warning(f"Error cleaning up old producers: {e}")
+
         logger.info(f"Creating producer with SSRC: {detected_ssrc}")
         video_producer = await mediasoup_client.create_producer(
             transport_id, "video", video_rtp_parameters
@@ -208,12 +247,12 @@ async def start_device_stream(
 
         # 4. NOW start FFmpeg to send RTP to MediaSoup (producer already exists and ready)
         logger.info(f"Starting FFmpeg to send RTP to MediaSoup...")
-        # Use host IP since FFmpeg runs in container and MediaSoup runs on host
-        mediasoup_host_ip = os.getenv("MEDIASOUP_HOST_IP", "10.30.250.245")
+        # Both backend and MediaSoup run in host network mode
+        mediasoup_host = os.getenv("MEDIASOUP_HOST", "127.0.0.1")
         stream_info = await rtsp_pipeline.start_stream(
             stream_id=room_id,
             rtsp_url=device.rtsp_url,
-            mediasoup_ip=mediasoup_host_ip,
+            mediasoup_ip=mediasoup_host,
             mediasoup_video_port=video_port,
             ssrc=detected_ssrc  # Pass SSRC for logging
         )
@@ -351,5 +390,104 @@ async def delete_device(
     await db.commit()
 
     return None
+
+
+# Ruth-AI Compatibility Endpoints
+@router.post("/validate")
+async def validate_device(
+    device_data: DeviceCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Validate device RTSP connection without saving to database.
+
+    This endpoint is compatible with the old VAS API's device validation endpoint.
+    It tests the RTSP URL to ensure it's reachable and streams valid video.
+    """
+    from app.services.rtsp_pipeline import rtsp_pipeline
+    from loguru import logger
+
+    rtsp_url = device_data.rtsp_url
+
+    try:
+        logger.info(f"Validating RTSP URL: {rtsp_url}")
+
+        # Try to capture SSRC from the RTSP stream (this validates connectivity)
+        detected_ssrc = await rtsp_pipeline.capture_ssrc_with_temp_ffmpeg(rtsp_url, timeout=10.0)
+
+        if not detected_ssrc:
+            return {
+                "valid": False,
+                "error": "Failed to connect to RTSP stream or stream has no video",
+                "rtsp_url": rtsp_url
+            }
+
+        logger.info(f"RTSP URL validation successful: {rtsp_url} (SSRC: {detected_ssrc})")
+
+        return {
+            "valid": True,
+            "rtsp_url": rtsp_url,
+            "ssrc": detected_ssrc,
+            "message": "Device validated successfully"
+        }
+
+    except Exception as e:
+        logger.error(f"RTSP validation failed for {rtsp_url}: {e}")
+        return {
+            "valid": False,
+            "error": str(e),
+            "rtsp_url": rtsp_url
+        }
+
+
+@router.get("/{device_id}/status")
+async def get_device_status(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get device status including streaming state.
+
+    This endpoint is compatible with the old VAS API's device status endpoint.
+    Returns device information along with current streaming status.
+    """
+    from sqlalchemy import select
+    from app.services.rtsp_pipeline import rtsp_pipeline
+
+    # Get device
+    result = await db.execute(
+        select(Device).where(Device.id == device_id)
+    )
+    device = result.scalar_one_or_none()
+
+    if not device:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found"
+        )
+
+    # Check if stream is active
+    room_id = str(device_id)
+    stream_active = room_id in rtsp_pipeline.active_streams
+
+    stream_info = None
+    if stream_active:
+        stream_info = rtsp_pipeline.active_streams[room_id]
+
+    return {
+        "device_id": str(device.id),
+        "name": device.name,
+        "description": device.description,
+        "location": device.location,
+        "rtsp_url": device.rtsp_url,
+        "is_active": device.is_active,
+        "created_at": device.created_at,
+        "updated_at": device.updated_at,
+        "streaming": {
+            "active": stream_active,
+            "room_id": room_id if stream_active else None,
+            "started_at": stream_info.get("started_at") if stream_info else None
+        }
+    }
 
 

@@ -4,6 +4,7 @@ from app.models.stream import Stream
 from app.models.recording import Recording
 from app.models.bookmark import Bookmark
 from app.models.snapshot import Snapshot
+from app.models.api_key import ApiKey
 
 __all__ = [
     "Device",
@@ -11,7 +12,5 @@ __all__ = [
     "Recording",
     "Bookmark",
     "Snapshot",
+    "ApiKey",
 ]
-
-
-

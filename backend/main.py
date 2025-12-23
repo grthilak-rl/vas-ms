@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config.logging_config import setup_logging
 from database import engine, Base
 from loguru import logger
+from app.middleware.auth import api_key_middleware
 
 # Initialize logging
 logger = setup_logging()
@@ -58,6 +59,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# API Key authentication middleware
+app.middleware("http")(api_key_middleware)
 
 # Error handlers
 @app.exception_handler(StarletteHTTPException)
@@ -154,7 +158,7 @@ async def root():
     }
 
 # API routes
-from app.routes import devices, streams, mediasoup, rtsp_pipeline, recordings, websocket, snapshots, bookmarks
+from app.routes import devices, streams, mediasoup, rtsp_pipeline, recordings, websocket, snapshots, bookmarks, api_keys, ruth_ai_compat
 
 app.include_router(devices.router)
 app.include_router(streams.router)
@@ -164,6 +168,8 @@ app.include_router(recordings.router)
 app.include_router(websocket.router)
 app.include_router(snapshots.router)
 app.include_router(bookmarks.router)
+app.include_router(api_keys.router)
+app.include_router(ruth_ai_compat.router)
 
 # Add routes for HLS streaming (without api/v1 prefix for convenience)
 from fastapi.responses import FileResponse

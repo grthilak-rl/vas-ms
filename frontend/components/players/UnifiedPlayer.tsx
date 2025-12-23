@@ -30,6 +30,11 @@ export default function UnifiedPlayer({ deviceId, deviceName, shouldConnect = fa
   const [isTransitioning, setIsTransitioning] = useState<boolean>(false);
   const [hlsTargetTime, setHlsTargetTime] = useState<number | null>(null);
 
+  // Date/time selection for historical playback
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [startTime, setStartTime] = useState<string>('00:00');
+  const [endTime, setEndTime] = useState<string>('23:59');
+
   const hlsPlayerRef = useRef<HTMLVideoElement>(null);
   const liveUpdateIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -186,7 +191,9 @@ export default function UnifiedPlayer({ deviceId, deviceName, shouldConnect = fa
         ) : (
           <div className="w-full h-full">
             <HLSPlayer
-              streamUrl={`${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/recordings/devices/${deviceId}/playlist`}
+              streamUrl={`${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/recordings/devices/${deviceId}/playlist${
+                selectedDate ? `?date=${selectedDate}&start_time=${startTime}:00&end_time=${endTime}:59` : ''
+              }`}
               deviceName={deviceName}
               seekToTime={hlsTargetTime || undefined}
             />
@@ -200,6 +207,79 @@ export default function UnifiedPlayer({ deviceId, deviceName, shouldConnect = fa
           <div className="text-white text-center">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
             <p>Switching to {isLive ? 'Live' : 'Historical'} mode...</p>
+          </div>
+        </div>
+      )}
+
+      {/* Date/Time Selection Controls */}
+      {!isLive && recordingDates.length > 0 && (
+        <div className="absolute top-4 left-4 z-20 bg-black bg-opacity-90 rounded-lg p-3 shadow-lg">
+          <div className="flex flex-col gap-2">
+            <div className="flex gap-2 items-center">
+              <label className="text-white text-sm font-medium min-w-[40px]">Date:</label>
+              <select
+                value={selectedDate || ''}
+                onChange={(e) => setSelectedDate(e.target.value || null)}
+                className="bg-gray-800 text-white px-3 py-1.5 rounded text-sm border border-gray-600 focus:border-blue-500 focus:outline-none"
+              >
+                <option value="">Live Buffer (24h)</option>
+                {recordingDates.map(date => (
+                  <option key={date.date} value={date.date}>
+                    {date.formatted} ({date.segments_count} segments)
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {selectedDate && (
+              <div className="flex gap-2 items-center">
+                <label className="text-white text-sm font-medium min-w-[40px]">Time:</label>
+                <input
+                  type="time"
+                  value={startTime}
+                  onChange={(e) => setStartTime(e.target.value)}
+                  className="bg-gray-800 text-white px-2 py-1 rounded text-sm border border-gray-600 focus:border-blue-500 focus:outline-none"
+                />
+                <span className="text-white text-sm">to</span>
+                <input
+                  type="time"
+                  value={endTime}
+                  onChange={(e) => setEndTime(e.target.value)}
+                  className="bg-gray-800 text-white px-2 py-1 rounded text-sm border border-gray-600 focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+            )}
+
+            <div className="flex gap-1 mt-1">
+              <button
+                onClick={() => {
+                  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+                  setSelectedDate(today);
+                  setStartTime('00:00');
+                  setEndTime('23:59');
+                }}
+                className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs transition-colors"
+              >
+                Today
+              </button>
+              <button
+                onClick={() => {
+                  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10).replace(/-/g, '');
+                  setSelectedDate(yesterday);
+                  setStartTime('00:00');
+                  setEndTime('23:59');
+                }}
+                className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs transition-colors"
+              >
+                Yesterday
+              </button>
+              <button
+                onClick={() => setSelectedDate(null)}
+                className="px-2 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded text-xs transition-colors"
+              >
+                Live Buffer
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -274,21 +354,6 @@ export default function UnifiedPlayer({ deviceId, deviceName, shouldConnect = fa
               : 'No recordings yet'}
           </span>
           <span>{formatTime(timelineEnd)}</span>
-        </div>
-      </div>
-
-      {/* Live latency indicator (top right) */}
-      <div className="absolute top-4 right-4 z-10">
-        <div className="bg-black bg-opacity-75 text-white px-3 py-1 rounded text-xs">
-          {isLive ? (
-            <span className="flex items-center gap-2">
-              Real-time (&lt;500ms latency)
-            </span>
-          ) : (
-            <span className="flex items-center gap-2">
-              Recorded feed (seekable)
-            </span>
-          )}
         </div>
       </div>
     </div>
