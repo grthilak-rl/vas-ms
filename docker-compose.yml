@@ -4,7 +4,7 @@ services:
   # PostgreSQL Database
   db:
     image: postgres:15-alpine
-    container_name: vas-db
+    container_name: vas-ms-v2-db
     environment:
       POSTGRES_USER: vas
       POSTGRES_PASSWORD: vas_password
@@ -12,7 +12,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432"
     networks:
       - vas_net
     healthcheck:
@@ -24,9 +24,9 @@ services:
   # Redis Cache
   redis:
     image: redis:7-alpine
-    container_name: vas-redis
+    container_name: vas-ms-v2-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     networks:
@@ -42,8 +42,12 @@ services:
     build:
       context: ./mediasoup-server
       dockerfile: Dockerfile
-    container_name: vas-mediasoup
-    network_mode: host
+    container_name: vas-ms-v2-mediasoup
+    ports:
+      - "3002:3001"
+      - "20000-20999:20000-20999/udp"  # WebRTC UDP ports
+    networks:
+      - vas_net
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
       interval: 30s
@@ -56,24 +60,41 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: vas-backend
-    network_mode: host
+    container_name: vas-ms-v2-backend
+    ports:
+      - "8085:8085"
+    networks:
+      - vas_net
     environment:
-      DATABASE_URL: postgresql://vas:vas_password@localhost:5432/vas_db
-      REDIS_URL: redis://localhost:6379
+      DATABASE_URL: postgresql://vas:vas_password@db:5432/vas_db
+      REDIS_URL: redis://redis:6379
+      MEDIASOUP_URL: ws://mediasoup:3001
+      MEDIASOUP_HOST: mediasoup  # Host for RTP traffic (must resolve to mediasoup container)
       # MEDIASOUP_WORKER_OPTIONS removed - using default from settings.py
-      MEDIASOUP_RTC_MIN_PORT: 40000
-      MEDIASOUP_RTC_MAX_PORT: 40999
+      MEDIASOUP_RTC_MIN_PORT: 20000
+      MEDIASOUP_RTC_MAX_PORT: 20999
       # API Authentication
-      VAS_REQUIRE_AUTH: "false"  # Set to "true" to enable API key authentication
+      VAS_REQUIRE_AUTH: "true"  # Set to "true" to enable API key authentication
       VAS_API_KEY: "vas_default_api_key_change_in_production"  # Default API key when auth is enabled
+      # JWT Configuration
+      JWT_SECRET_KEY: "your-secret-key-change-in-production-minimum-32-chars"
+      JWT_ALGORITHM: "HS256"
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: "60"
     volumes:
       - ./backend:/app
       - recordings:/app/recordings
       - snapshots:/app/snapshots
-    command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+      - bookmarks:/bookmarks
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mediasoup:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8085 --reload
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -84,11 +105,15 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: vas-frontend
+      args:
+        # Use host IP for external access (frontend runs in browser, needs host-accessible URL)
+        NEXT_PUBLIC_API_URL: http://10.30.250.245:8085
+    container_name: vas-ms-v2-frontend
     environment:
-      NEXT_PUBLIC_API_URL: http://backend:8080
+      # Browser needs to access backend via host IP, not container name
+      NEXT_PUBLIC_API_URL: http://10.30.250.245:8085
     ports:
-      - "3000:3000"
+      - "3200:3000"
     depends_on:
       backend:
         condition: service_healthy
@@ -106,6 +131,7 @@ volumes:
   redis_data:
   recordings:
   snapshots:
+  bookmarks:
 
 networks:
   vas_net:

@@ -3,6 +3,8 @@
 import { useState, useRef, useImperativeHandle, forwardRef, useEffect } from 'react';
 import MediaSoupPlayer from './MediaSoupPlayer';
 import dynamic from 'next/dynamic';
+import { API_URL } from '@/lib/api-v2';
+import { getHeaders } from '@/lib/api';
 
 const HLSPlayer = dynamic(() => import('./HLSPlayer'), { ssr: false });
 
@@ -45,8 +47,9 @@ const DualModePlayer = forwardRef<DualModePlayerRef, DualModePlayerProps>(
     // Fetch available recording dates when in historical mode
     useEffect(() => {
       if (mode === 'historical' && deviceId) {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080';
-        fetch(`${apiUrl}/api/v1/recordings/devices/${deviceId}/dates`)
+        fetch(`${API_URL}/api/v1/recordings/devices/${deviceId}/dates`, {
+          headers: getHeaders()
+        })
           .then(res => res.json())
           .then(data => {
             if (data.dates) {
@@ -180,14 +183,14 @@ const DualModePlayer = forwardRef<DualModePlayerRef, DualModePlayerProps>(
         {mode === 'live' ? (
           <MediaSoupPlayer
             roomId={deviceId}
-            mediasoupUrl="ws://10.30.250.245:8080/ws/mediasoup"
+            mediasoupUrl={`${API_URL.replace('http', 'ws')}/ws/mediasoup`}
             shouldConnect={shouldConnect}
             onLog={onLog}
           />
         ) : (
           <HLSPlayer
             ref={hlsPlayerRef}
-            streamUrl={`${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/recordings/devices/${deviceId}/playlist${
+            streamUrl={`${API_URL}/api/v1/recordings/devices/${deviceId}/playlist${
               selectedDate ? `?date=${selectedDate}&start_time=${startTime}:00&end_time=${endTime}:59` : ''
             }`}
             deviceName={deviceName}

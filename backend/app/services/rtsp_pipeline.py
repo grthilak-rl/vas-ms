@@ -32,8 +32,7 @@ class RTSPPipeline:
 
         logger.info("RTSP Pipeline service initialized")
 
-        # Start cleanup task
-        asyncio.create_task(self._start_cleanup_service())
+        # NOTE: Cleanup task deferred - no event loop at import time
     
     async def capture_ssrc_with_temp_ffmpeg(
         self,
@@ -790,4 +789,8 @@ class RTSPPipeline:
 # Global RTSP pipeline instance
 rtsp_pipeline = RTSPPipeline()
 
-
+# Module-level function aliases for backwards compatibility
+capture_ssrc_with_temp_ffmpeg = rtsp_pipeline.capture_ssrc_with_temp_ffmpeg
+start_stream = rtsp_pipeline.start_stream
+stop_stream = rtsp_pipeline.stop_stream
+get_active_streams = rtsp_pipeline.list_active_streams

@@ -1,5 +1,7 @@
 """
 Bookmark service for capturing 6-second video clips from live and historical streams.
+
+V2 Version: Uses stream_id instead of device_id.
 """
 import os
 import asyncio
@@ -11,6 +13,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from app.models.bookmark import Bookmark
+from app.models.stream import Stream
 from app.models.device import Device
 
 
@@ -24,7 +27,7 @@ class BookmarkService:
 
     async def capture_from_live_stream(
         self,
-        device_id: str,
+        stream_id: str,
         rtsp_url: str,
         label: Optional[str],
         db: AsyncSession
@@ -33,10 +36,10 @@ class BookmarkService:
         Capture a 6-second bookmark from live RTSP stream (last 6 seconds).
 
         Args:
-            device_id: Device UUID
+            stream_id: Stream UUID
             rtsp_url: RTSP stream URL
             label: Optional user label
-            db: Database session
+            db: AsyncSession
 
         Returns:
             Bookmark object with captured video clip
@@ -46,13 +49,13 @@ class BookmarkService:
         start_timestamp = center_timestamp - timedelta(seconds=6)
         end_timestamp = center_timestamp
 
-        device_dir = os.path.join(self.bookmark_base_dir, device_id)
-        os.makedirs(device_dir, exist_ok=True)
+        stream_dir = os.path.join(self.bookmark_base_dir, stream_id)
+        os.makedirs(stream_dir, exist_ok=True)
 
         filename = f"live_{center_timestamp.strftime('%Y%m%d_%H%M%S')}.mp4"
-        video_file_path = os.path.join(device_dir, filename)
+        video_file_path = os.path.join(stream_dir, filename)
         thumbnail_filename = f"live_{center_timestamp.strftime('%Y%m%d_%H%M%S')}_thumb.jpg"
-        thumbnail_path = os.path.join(device_dir, thumbnail_filename)
+        thumbnail_path = os.path.join(stream_dir, thumbnail_filename)
 
         logger.info(f"Capturing live bookmark (6s clip) from {rtsp_url} -> {video_file_path}")
 
@@ -108,16 +111,16 @@ class BookmarkService:
 
             # Create database entry
             bookmark = Bookmark(
-                device_id=device_id,
+                stream_id=stream_id,
                 center_timestamp=center_timestamp,
-                start_timestamp=start_timestamp,
-                end_timestamp=end_timestamp,
-                video_file_path=video_file_path,
+                start_time=start_timestamp,
+                end_time=end_timestamp,
+                file_path=video_file_path,
                 thumbnail_path=thumbnail_path if os.path.exists(thumbnail_path) else None,
                 label=label,
                 source="live",
-                duration=6,
-                video_format="mp4",
+                duration_seconds=6,
+                format="mp4",
                 file_size=file_size
             )
 
@@ -138,7 +141,7 @@ class BookmarkService:
 
     async def capture_from_historical(
         self,
-        device_id: str,
+        stream_id: str,
         center_timestamp: datetime,
         label: Optional[str],
         db: AsyncSession
@@ -147,10 +150,10 @@ class BookmarkService:
         Capture a 6-second bookmark from historical HLS recordings (±3 seconds).
 
         Args:
-            device_id: Device UUID
+            stream_id: Stream UUID
             center_timestamp: Center point of the bookmark
             label: Optional user label
-            db: Database session
+            db: AsyncSession
 
         Returns:
             Bookmark object with captured video clip
@@ -158,25 +161,33 @@ class BookmarkService:
         start_timestamp = center_timestamp - timedelta(seconds=3)
         end_timestamp = center_timestamp + timedelta(seconds=3)
 
+        # Get stream to find device/camera
+        stream_query = select(Stream).where(Stream.id == stream_id)
+        stream_result = await db.execute(stream_query)
+        stream = stream_result.scalar_one_or_none()
+
+        if not stream:
+            raise ValueError(f"Stream {stream_id} not found")
+
         # Find the recording segments for this timestamp
         # Recordings are organized in dated folders: /recordings/hot/{device_id}/YYYYMMDD/segment-{unix_ts}.ts
         hls_base_dir = "/recordings/hot"
-        device_recording_dir = os.path.join(hls_base_dir, device_id)
+        device_recording_dir = os.path.join(hls_base_dir, str(stream.camera_id))
 
         # Get the date folder for the requested timestamp
         date_folder = start_timestamp.strftime("%Y%m%d")
         date_folder_path = os.path.join(device_recording_dir, date_folder)
 
         if not os.path.exists(date_folder_path):
-            raise FileNotFoundError(f"No recordings found for device {device_id} on date {date_folder}")
+            raise FileNotFoundError(f"No recordings found for stream {stream_id} on date {date_folder}")
 
-        device_dir = os.path.join(self.bookmark_base_dir, device_id)
-        os.makedirs(device_dir, exist_ok=True)
+        stream_dir = os.path.join(self.bookmark_base_dir, stream_id)
+        os.makedirs(stream_dir, exist_ok=True)
 
         filename = f"historical_{center_timestamp.strftime('%Y%m%d_%H%M%S')}.mp4"
-        video_file_path = os.path.join(device_dir, filename)
+        video_file_path = os.path.join(stream_dir, filename)
         thumbnail_filename = f"historical_{center_timestamp.strftime('%Y%m%d_%H%M%S')}_thumb.jpg"
-        thumbnail_path = os.path.join(device_dir, thumbnail_filename)
+        thumbnail_path = os.path.join(stream_dir, thumbnail_filename)
 
         logger.info(f"Capturing historical bookmark from {date_folder_path} at {center_timestamp}")
 
@@ -261,7 +272,7 @@ class BookmarkService:
         logger.info(f"  - Segment details: {[(ts, os.path.basename(path)) for ts, path in target_segments]}")
 
         # Create a concat file for FFmpeg to process multiple segments
-        concat_file_path = os.path.join(device_dir, f"concat_temp_{center_timestamp.timestamp()}.txt")
+        concat_file_path = os.path.join(stream_dir, f"concat_temp_{center_timestamp.timestamp()}.txt")
         with open(concat_file_path, 'w') as f:
             for seg_ts, seg_path in target_segments:
                 f.write(f"file '{seg_path}'\n")
@@ -327,16 +338,16 @@ class BookmarkService:
 
             # Create database entry
             bookmark = Bookmark(
-                device_id=device_id,
+                stream_id=stream_id,
                 center_timestamp=center_timestamp,
-                start_timestamp=start_timestamp,
-                end_timestamp=end_timestamp,
-                video_file_path=video_file_path,
+                start_time=start_timestamp,
+                end_time=end_timestamp,
+                file_path=video_file_path,
                 thumbnail_path=thumbnail_path if os.path.exists(thumbnail_path) else None,
                 label=label,
                 source="historical",
-                duration=6,
-                video_format="mp4",
+                duration_seconds=6,
+                format="mp4",
                 file_size=file_size
             )
 
@@ -405,16 +416,16 @@ class BookmarkService:
     async def get_bookmarks(
         self,
         db: AsyncSession,
-        device_id: Optional[str] = None,
+        stream_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 100
     ) -> List[Bookmark]:
         """
-        Get list of bookmarks with optional device filter.
+        Get list of bookmarks with optional stream filter.
 
         Args:
             db: Database session
-            device_id: Optional device UUID filter
+            stream_id: Optional stream UUID filter
             skip: Number of records to skip
             limit: Max records to return
 
@@ -423,8 +434,8 @@ class BookmarkService:
         """
         query = select(Bookmark).order_by(Bookmark.created_at.desc())
 
-        if device_id:
-            query = query.filter(Bookmark.device_id == device_id)
+        if stream_id:
+            query = query.filter(Bookmark.stream_id == stream_id)
 
         query = query.offset(skip).limit(limit)
         result = await db.execute(query)
@@ -458,9 +469,9 @@ class BookmarkService:
 
         # Delete files
         try:
-            if os.path.exists(bookmark.video_file_path):
-                os.remove(bookmark.video_file_path)
-                logger.info(f"Deleted video file: {bookmark.video_file_path}")
+            if os.path.exists(bookmark.file_path):
+                os.remove(bookmark.file_path)
+                logger.info(f"Deleted video file: {bookmark.file_path}")
 
             if bookmark.thumbnail_path and os.path.exists(bookmark.thumbnail_path):
                 os.remove(bookmark.thumbnail_path)

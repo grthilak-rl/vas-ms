@@ -2,12 +2,15 @@
 
 import { useState, useEffect, useRef } from 'react';
 import DualModePlayer, { DualModePlayerRef } from '@/components/players/DualModePlayer';
-import { getDevices, Device, captureBookmarkLive, captureBookmarkHistorical } from '@/lib/api';
+import { getDevices, Device } from '@/lib/api';
+import { getStreams, createSnapshot, createBookmark, startDeviceStream, stopDeviceStream, getRecordingPlaylist, API_URL } from '@/lib/api-v2';
 import { CameraIcon, VideoCameraIcon, PlayIcon, StopIcon } from '@heroicons/react/24/outline';
+import { useAuth } from '@/contexts/AuthContext';
 
 type GridSize = 2 | 3 | 4;
 
 export default function StreamsPage() {
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const [devices, setDevices] = useState<Device[]>([]);
   const [selectedDevices, setSelectedDevices] = useState<string[]>([]);
   const [gridSize, setGridSize] = useState<GridSize>(2);
@@ -22,8 +25,14 @@ export default function StreamsPage() {
   const [playerModes, setPlayerModes] = useState<Record<string, 'live' | 'historical'>>({});
   const playerRefs = useRef<Record<string, DualModePlayerRef | null>>({});
 
-  // Load persisted state on mount
+  // V2 API: Device-to-Stream mapping (camera_id -> stream_id)
+  const [deviceStreamMap, setDeviceStreamMap] = useState<Record<string, string>>({});
+
+  // Load persisted state on mount - but only after auth is ready
   useEffect(() => {
+    // Wait for auth to finish loading before making API calls
+    if (authLoading || !isAuthenticated) return;
+
     loadDevices();
 
     // Load selected devices from localStorage (which devices to display)
@@ -42,9 +51,7 @@ export default function StreamsPage() {
     // new MediaSoup transports, leading to port exhaustion.
     // Instead, we rely on backend sync (device.is_active) to show
     // which streams are running, and let users manually reconnect.
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [authLoading, isAuthenticated]);
 
   // Persist selected devices to localStorage whenever they change
   useEffect(() => {
@@ -70,11 +77,36 @@ export default function StreamsPage() {
       const data = await getDevices();
       setDevices(data);
 
+      // Discover V2 streams for snapshot/bookmark capture
+      await discoverStreams();
+
       // NOTE: We don't auto-set activeStreams here to avoid auto-reconnecting
       // players. The backend's device.is_active shows stream state for UI only.
       // Users must manually click "Start Stream" to reconnect.
     } catch (err: any) {
       console.error('Failed to load devices:', err);
+    }
+  };
+
+  const discoverStreams = async () => {
+    try {
+      const { streams } = await getStreams('live'); // Only get active streams
+
+      // Map camera_id (device_id) to stream_id
+      const mapping: Record<string, string> = {};
+      streams.forEach(stream => {
+        mapping[stream.camera_id] = stream.id;
+      });
+
+      setDeviceStreamMap(mapping);
+      console.log('📡 Stream discovery:', mapping);
+    } catch (err: any) {
+      // Don't log auth errors as failures - they're expected when not logged in
+      if (err.message?.includes('Authentication required')) {
+        console.log('📡 Stream discovery skipped - not authenticated');
+      } else {
+        console.error('Failed to discover streams:', err);
+      }
     }
   };
 
@@ -92,25 +124,21 @@ export default function StreamsPage() {
       if (device?.is_active) {
         // Stream is already running on backend, just connect the player
         console.log('Stream already active on backend, connecting player...');
+        // Refresh stream discovery to ensure we have the V2 Stream ID for snapshots/bookmarks
+        await discoverStreams();
         setActiveStreams(prev => ({ ...prev, [deviceId]: true }));
       } else {
-        // Stream not running, start it on backend
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/devices/${deviceId}/start-stream`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        });
-
-        if (!response.ok) {
-          const error = await response.json();
-          const errMsg = error.detail || 'Failed to start stream';
-          throw new Error(errMsg);
-        }
-
-        const data = await response.json();
+        // Stream not running, start it on backend (using JWT-authenticated V2 wrapper)
+        const data = await startDeviceStream(deviceId);
         console.log('Stream started:', data);
 
         // Reload devices to update status
         await loadDevices();
+
+        // Explicitly refresh stream discovery to get the new V2 Stream ID
+        // This is needed for snapshot/bookmark functionality
+        await discoverStreams();
+        console.log('📡 Stream discovery refreshed after start');
 
         // Wait a moment for producer to be ready, then trigger player connection
         await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
@@ -130,18 +158,8 @@ export default function StreamsPage() {
     try {
       setLoading(prev => ({ ...prev, [deviceId]: true }));
 
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/devices/${deviceId}/stop-stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        const errMsg = error.detail || 'Failed to stop stream';
-        throw new Error(errMsg);
-      }
-
-      const data = await response.json();
+      // Use JWT-authenticated V2 wrapper
+      const data = await stopDeviceStream(deviceId);
       console.log('Stream stopped:', data);
 
       // Update UI immediately
@@ -162,13 +180,16 @@ export default function StreamsPage() {
     try {
       setCapturingSnapshot(prev => ({ ...prev, [deviceId]: true }));
 
-      const mode = playerModes[deviceId] || 'live';
-      let endpoint = '';
-      let body: any = {};
+      // Get stream_id from device-to-stream mapping
+      const streamId = deviceStreamMap[deviceId];
+      if (!streamId) {
+        throw new Error('No active stream found for this device. Please start the stream first.');
+      }
 
-      if (mode === 'live') {
-        endpoint = `${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/snapshots/devices/${deviceId}/capture/live`;
-      } else {
+      const mode = playerModes[deviceId] || 'live';
+      let timestamp: string | undefined;
+
+      if (mode === 'historical') {
         // Historical mode - get timestamp from HLS playlist
         const playerRef = playerRefs.current[deviceId];
         const videoElement = playerRef?.getVideoElement();
@@ -180,25 +201,20 @@ export default function StreamsPage() {
         const currentTime = videoElement.currentTime || 0;
 
         // Get the actual timestamp by parsing the HLS playlist
-        const timestamp = await getTimestampFromHLSPosition(deviceId, currentTime);
-
-        endpoint = `${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/snapshots/devices/${deviceId}/capture/historical`;
-        body = { timestamp };
+        timestamp = await getTimestampFromHLSPosition(deviceId, currentTime);
       }
 
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined
+      console.log('📸 Snapshot Request:', {
+        deviceId,
+        streamId,
+        mode,
+        timestamp
       });
 
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || 'Failed to capture snapshot');
-      }
-
-      const data = await response.json();
-      console.log('✅ Snapshot captured:', data.snapshot.id);
+      // V2 API call - pass source explicitly based on mode
+      const source = mode === 'live' ? 'live' : 'historical';
+      const snapshot = await createSnapshot(streamId, source, timestamp);
+      console.log('✅ Snapshot captured:', snapshot.id);
 
       // Show success indicator briefly
       setSnapshotSuccess(prev => ({ ...prev, [deviceId]: true }));
@@ -215,10 +231,8 @@ export default function StreamsPage() {
   };
 
   const getTimestampFromHLSPosition = async (deviceId: string, currentTime: number): Promise<string> => {
-    // Fetch HLS playlist to get segment information
-    const playlistUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/recordings/devices/${deviceId}/playlist`;
-    const response = await fetch(playlistUrl);
-    const playlistText = await response.text();
+    // Fetch HLS playlist to get segment information (using authenticated API)
+    const playlistText = await getRecordingPlaylist(deviceId);
 
     // Parse playlist to extract segments and their durations
     const lines = playlistText.split('\n');
@@ -287,11 +301,18 @@ export default function StreamsPage() {
     try {
       setCapturingBookmark(prev => ({ ...prev, [deviceId]: true }));
 
+      // Get stream_id from device-to-stream mapping
+      const streamId = deviceStreamMap[deviceId];
+      if (!streamId) {
+        throw new Error('No active stream found for this device. Please start the stream first.');
+      }
+
       const mode = playerModes[deviceId] || 'live';
-      let bookmark;
+      let centerTimestamp: string;
 
       if (mode === 'live') {
-        bookmark = await captureBookmarkLive(deviceId);
+        // For live mode, use current time
+        centerTimestamp = new Date().toISOString();
       } else {
         // Historical mode - get timestamp from HLS playlist
         const playerRef = playerRefs.current[deviceId];
@@ -304,17 +325,19 @@ export default function StreamsPage() {
         const currentTime = videoElement.currentTime || 0;
 
         // Get the actual timestamp by parsing the HLS playlist
-        const centerTimestamp = await getTimestampFromHLSPosition(deviceId, currentTime);
-
-        console.log('📍 Historical Bookmark Request:', {
-          currentTime,
-          centerTimestamp,
-          now: new Date().toISOString()
-        });
-
-        bookmark = await captureBookmarkHistorical(deviceId, centerTimestamp);
+        centerTimestamp = await getTimestampFromHLSPosition(deviceId, currentTime);
       }
 
+      console.log('📍 Bookmark Request:', {
+        deviceId,
+        streamId,
+        centerTimestamp,
+        mode
+      });
+
+      // V2 API call - pass source explicitly based on mode
+      const source = mode === 'live' ? 'live' : 'historical';
+      const bookmark = await createBookmark(streamId, source, centerTimestamp);
       console.log('✅ Bookmark captured:', bookmark.id);
 
       // Show success indicator briefly

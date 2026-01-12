@@ -4,9 +4,16 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from config import settings
 
-# Import base and models
+# Import base and models (must import all for autogenerate)
 from database import Base
-from app.models import Device, Stream, Recording, Bookmark, Snapshot
+from app.models import (
+    Device, Stream, StreamState,
+    Producer, ProducerState,
+    Consumer, ConsumerState,
+    StreamStateTransition,
+    Recording, Bookmark, Snapshot,
+    ApiKey, JWTToken, RefreshToken
+)
 
 # this is the Alembic Config object
 config = context.config

@@ -4,6 +4,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import WebRTCPlayer from '@/components/players/WebRTCPlayer';
 import { getDevices, Device, startStream } from '@/lib/api';
+import { API_URL } from '@/lib/api-v2';
 
 export default function StreamViewPage() {
   const params = useParams();
@@ -83,7 +84,7 @@ export default function StreamViewPage() {
         <div className="aspect-video w-full bg-gray-900 rounded-lg overflow-hidden mb-6">
           <WebRTCPlayer
             streamId={deviceId}
-            signalingUrl="ws://10.30.250.245:8080/ws/signaling"
+            signalingUrl={`${API_URL.replace('http', 'ws')}/ws/signaling`}
           />
         </div>
 

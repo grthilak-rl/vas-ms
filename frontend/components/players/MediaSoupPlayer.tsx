@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import * as mediasoupClient from 'mediasoup-client';
+import { API_URL } from '@/lib/api-v2';
 
 interface MediaSoupPlayerProps {
   roomId: string; // Device ID
@@ -12,7 +13,7 @@ interface MediaSoupPlayerProps {
 
 export default function MediaSoupPlayer({
   roomId,
-  mediasoupUrl = 'ws://10.30.250.245:8080/ws/mediasoup',  // Proxy through backend
+  mediasoupUrl = `${API_URL.replace('http', 'ws')}/ws/mediasoup`,  // Proxy through backend
   shouldConnect = false,
   onLog
 }: MediaSoupPlayerProps) {

@@ -26,10 +26,12 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8080, alias="API_PORT")
     websocket_port: int = Field(default=8081, alias="WEBSOCKET_PORT")
     
-    # Security
+    # Security & Authentication
     secret_key: str = Field(default="your-secret-key", alias="SECRET_KEY")
+    jwt_secret_key: str = Field(default="CHANGE_ME_IN_PRODUCTION", alias="JWT_SECRET_KEY")
     algorithm: str = Field(default="HS256", alias="ALGORITHM")
-    access_token_expire_minutes: int = 30
+    access_token_expire_minutes: int = 60  # 1 hour for JWT access tokens
+    refresh_token_expire_days: int = 7  # 7 days for refresh tokens
     
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

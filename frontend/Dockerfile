@@ -1,4 +1,4 @@
-FROM node:18-alpine AS base
+FROM node:20-alpine AS base
 
 # Install dependencies only when needed
 FROM base AS deps
@@ -14,8 +14,10 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Set environment variables
-ENV NEXT_PUBLIC_API_URL=http://localhost:8080
+# Set environment variables (passed as build arg from docker-compose)
+# Note: NEXT_PUBLIC_ vars are baked at build time, so we use ARG to pass it in
+ARG NEXT_PUBLIC_API_URL=http://10.30.250.245:8080
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
 RUN npm run build
 

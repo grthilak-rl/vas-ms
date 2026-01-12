@@ -1,26 +1,61 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { getBookmarks, deleteBookmark, updateBookmark, getDevices, Bookmark, Device } from '@/lib/api';
+import {
+  getBookmarks,
+  deleteBookmark,
+  updateBookmark,
+  getBookmarkVideoUrl,
+  getBookmarkThumbnailUrl,
+  downloadBookmarkVideo,
+  V2Bookmark
+} from '@/lib/api-v2';
+import { getDevices, Device } from '@/lib/api';
 
 export default function BookmarksPage() {
-  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [bookmarks, setBookmarks] = useState<V2Bookmark[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDevice, setSelectedDevice] = useState<string>('all');
-  const [viewingBookmark, setViewingBookmark] = useState<Bookmark | null>(null);
+  const [eventType, setEventType] = useState<string>('all');
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [dateRange, setDateRange] = useState({ start: '', end: '' });
+  const [viewingBookmark, setViewingBookmark] = useState<V2Bookmark | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState('');
+  const [editTags, setEditTags] = useState<string[]>([]);
+  const [newTag, setNewTag] = useState('');
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [loadingVideo, setLoadingVideo] = useState(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  const loadBookmarks = async (deviceId?: string) => {
+  // Get all unique tags from bookmarks for filter
+  const availableTags = Array.from(
+    new Set(bookmarks.flatMap(b => b.tags || []))
+  ).sort();
+
+  const loadBookmarks = async () => {
     try {
       setLoading(true);
       setError(null);
-      const data = await getBookmarks(deviceId === 'all' ? undefined : deviceId);
-      setBookmarks(data);
+
+      const data = await getBookmarks(
+        selectedDevice === 'all' ? undefined : selectedDevice,
+        eventType === 'all' ? undefined : eventType,
+        selectedTags.length > 0 ? selectedTags : undefined,
+        dateRange.start || undefined,
+        dateRange.end || undefined,
+        100,
+        0
+      );
+
+      setBookmarks(data.bookmarks); // V2 returns { bookmarks: [], pagination: {} }
+      // Load thumbnails with authentication
+      loadThumbnails(data.bookmarks);
     } catch (err: any) {
       console.error('Failed to load bookmarks:', err);
       setError(err.message || 'Failed to load bookmarks');
@@ -38,26 +73,84 @@ export default function BookmarksPage() {
     }
   };
 
+  // Load thumbnail URLs with authentication
+  const loadThumbnails = async (bookmarkList: V2Bookmark[]) => {
+    const urls: Record<string, string> = {};
+    for (const bookmark of bookmarkList) {
+      if (bookmark.thumbnail_url && bookmark.status === 'ready') {
+        try {
+          urls[bookmark.id] = await getBookmarkThumbnailUrl(bookmark.id);
+        } catch (err) {
+          console.error(`Failed to load thumbnail for ${bookmark.id}:`, err);
+        }
+      }
+    }
+    setThumbnailUrls(urls);
+  };
+
+  // Handle viewing a bookmark - load video with auth
+  const handleViewBookmark = async (bookmark: V2Bookmark) => {
+    setViewingBookmark(bookmark);
+    setVideoUrl(null);
+
+    if (bookmark.video_url && bookmark.status === 'ready') {
+      setLoadingVideo(true);
+      try {
+        const url = await getBookmarkVideoUrl(bookmark.id);
+        setVideoUrl(url);
+      } catch (err) {
+        console.error('Failed to load video:', err);
+      } finally {
+        setLoadingVideo(false);
+      }
+    }
+  };
+
+  // Handle download with authentication
+  const handleDownload = async (bookmark: V2Bookmark) => {
+    if (!bookmark.video_url || bookmark.status !== 'ready') return;
+
+    setDownloadingId(bookmark.id);
+    try {
+      const filename = `bookmark-${bookmark.stream_id.substring(0, 8)}-${new Date(bookmark.center_timestamp).toISOString().replace(/[:.]/g, '-')}.mp4`;
+      await downloadBookmarkVideo(bookmark.id, filename);
+    } catch (err: any) {
+      console.error('Failed to download video:', err);
+      alert(`Failed to download: ${err.message}`);
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  // Cleanup video URL when modal closes
+  const handleCloseModal = () => {
+    if (videoUrl) {
+      URL.revokeObjectURL(videoUrl);
+    }
+    setVideoUrl(null);
+    setViewingBookmark(null);
+  };
+
   useEffect(() => {
     loadDevices();
     loadBookmarks();
   }, []);
 
   useEffect(() => {
-    loadBookmarks(selectedDevice);
-  }, [selectedDevice]);
+    loadBookmarks();
+  }, [selectedDevice, eventType, selectedTags, dateRange]);
 
   // Keyboard support for closing modal
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && viewingBookmark) {
-        setViewingBookmark(null);
+        handleCloseModal();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [viewingBookmark]);
+  }, [viewingBookmark, videoUrl]);
 
   const handleDelete = async (bookmarkId: string) => {
     if (!confirm('Are you sure you want to delete this bookmark?')) {
@@ -67,7 +160,7 @@ export default function BookmarksPage() {
     try {
       setDeletingId(bookmarkId);
       await deleteBookmark(bookmarkId);
-      await loadBookmarks(selectedDevice);
+      await loadBookmarks();
     } catch (err: any) {
       console.error('Failed to delete bookmark:', err);
       alert(`Failed to delete bookmark: ${err.message}`);
@@ -76,15 +169,34 @@ export default function BookmarksPage() {
     }
   };
 
-  const handleUpdateLabel = async (bookmarkId: string, newLabel: string) => {
+  const handleUpdateLabel = async (bookmarkId: string, newLabel: string, tags: string[]) => {
     try {
-      await updateBookmark(bookmarkId, newLabel);
-      await loadBookmarks(selectedDevice);
+      await updateBookmark(bookmarkId, newLabel, tags);
+      await loadBookmarks();
       setEditingId(null);
     } catch (err: any) {
       console.error('Failed to update bookmark:', err);
       alert(`Failed to update label: ${err.message}`);
     }
+  };
+
+  const toggleTagFilter = (tag: string) => {
+    if (selectedTags.includes(tag)) {
+      setSelectedTags(selectedTags.filter(t => t !== tag));
+    } else {
+      setSelectedTags([...selectedTags, tag]);
+    }
+  };
+
+  const addTag = () => {
+    if (newTag && !editTags.includes(newTag)) {
+      setEditTags([...editTags, newTag]);
+      setNewTag('');
+    }
+  };
+
+  const removeTag = (tag: string) => {
+    setEditTags(editTags.filter(t => t !== tag));
   };
 
   const formatTimestamp = (timestamp: string) => {
@@ -116,7 +228,7 @@ export default function BookmarksPage() {
           </p>
         </div>
         <button
-          onClick={() => loadBookmarks(selectedDevice)}
+          onClick={() => loadBookmarks()}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -126,26 +238,102 @@ export default function BookmarksPage() {
         </button>
       </div>
 
-      {/* Filter */}
-      <div className="bg-white shadow-sm rounded-lg border border-gray-200 p-4">
-        <div className="flex items-center gap-4">
-          <label className="text-sm font-medium text-gray-700">Filter by Device:</label>
-          <select
-            value={selectedDevice}
-            onChange={(e) => setSelectedDevice(e.target.value)}
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          >
-            <option value="all">All Devices</option>
-            {devices.map((device) => (
-              <option key={device.id} value={device.id}>
-                {device.name}
-              </option>
-            ))}
-          </select>
-          <span className="text-sm text-gray-600">
+      {/* Filters */}
+      <div className="bg-white shadow-sm rounded-lg border border-gray-200 p-4 space-y-4">
+        <div className="flex flex-wrap items-center gap-4">
+          {/* Device Filter */}
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-700">Device:</label>
+            <select
+              value={selectedDevice}
+              onChange={(e) => setSelectedDevice(e.target.value)}
+              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            >
+              <option value="all">All Devices</option>
+              {devices.map((device) => (
+                <option key={device.id} value={device.id}>
+                  {device.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Event Type Filter */}
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-700">Event Type:</label>
+            <select
+              value={eventType}
+              onChange={(e) => setEventType(e.target.value)}
+              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            >
+              <option value="all">All Events</option>
+              <option value="motion">Motion Detected</option>
+              <option value="person_detected">Person Detected</option>
+              <option value="vehicle">Vehicle</option>
+              <option value="anomaly">Anomaly</option>
+              <option value="manual">Manual</option>
+            </select>
+          </div>
+
+          {/* Date Range Filter */}
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-700">Date Range:</label>
+            <input
+              type="date"
+              value={dateRange.start}
+              onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })}
+              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            <span className="text-gray-500">to</span>
+            <input
+              type="date"
+              value={dateRange.end}
+              onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })}
+              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
+
+          <span className="ml-auto text-sm text-gray-600">
             {bookmarks.length} bookmark{bookmarks.length !== 1 ? 's' : ''}
           </span>
         </div>
+
+        {/* Tag Filters */}
+        {availableTags.length > 0 && (
+          <div className="flex items-start gap-2">
+            <label className="text-sm font-medium text-gray-700 pt-1.5">Tags:</label>
+            <div className="flex gap-2 flex-wrap">
+              {availableTags.map(tag => (
+                <button
+                  key={tag}
+                  onClick={() => toggleTagFilter(tag)}
+                  className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                    selectedTags.includes(tag)
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Active Filters Clear */}
+        {(selectedDevice !== 'all' || eventType !== 'all' || selectedTags.length > 0 || dateRange.start || dateRange.end) && (
+          <button
+            onClick={() => {
+              setSelectedDevice('all');
+              setEventType('all');
+              setSelectedTags([]);
+              setDateRange({ start: '', end: '' });
+            }}
+            className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+          >
+            Clear all filters
+          </button>
+        )}
       </div>
 
       {/* Loading State */}
@@ -200,13 +388,13 @@ export default function BookmarksPage() {
               <div
                 className="relative cursor-pointer overflow-hidden"
                 style={{ aspectRatio: '16/9', backgroundColor: '#000' }}
-                onClick={() => setViewingBookmark(bookmark)}
+                onClick={() => handleViewBookmark(bookmark)}
               >
                 {/* Video Thumbnail */}
-                {bookmark.thumbnail_url ? (
+                {thumbnailUrls[bookmark.id] ? (
                   <img
-                    src={`${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}${bookmark.thumbnail_url}`}
-                    alt={`Bookmark from ${bookmark.device_name || 'Unknown'}`}
+                    src={thumbnailUrls[bookmark.id]}
+                    alt={`Bookmark from stream ${bookmark.stream_id}`}
                     style={{
                       width: '100%',
                       height: '100%',
@@ -214,6 +402,13 @@ export default function BookmarksPage() {
                       display: 'block'
                     }}
                   />
+                ) : bookmark.status === 'processing' ? (
+                  <div className="w-full h-full flex items-center justify-center bg-gray-800">
+                    <div className="text-center">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-2"></div>
+                      <span className="text-xs text-gray-400">Processing...</span>
+                    </div>
+                  </div>
                 ) : (
                   <div className="w-full h-full flex items-center justify-center bg-gray-800">
                     <svg className="w-12 h-12 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
@@ -238,61 +433,105 @@ export default function BookmarksPage() {
                 </div>
 
                 {/* Source Badge */}
-                <div className="absolute top-2 left-2" style={{ zIndex: 10 }}>
-                  <span className={`px-2 py-1 rounded-md text-xs font-medium shadow-lg ${
-                    bookmark.source === 'live'
-                      ? 'bg-red-600 text-white'
-                      : 'bg-blue-600 text-white'
-                  }`}>
-                    {bookmark.source === 'live' ? '🔴 Live' : '📼 Historical'}
-                  </span>
+                <div className="absolute top-2 left-2 flex gap-2" style={{ zIndex: 10 }}>
+                  {bookmark.source === 'ai_generated' ? (
+                    <span className="px-2 py-1 rounded-md text-xs font-medium shadow-lg bg-purple-600 text-white flex items-center gap-1">
+                      🤖 AI Generated
+                    </span>
+                  ) : (
+                    <span className={`px-2 py-1 rounded-md text-xs font-medium shadow-lg ${
+                      bookmark.source === 'live'
+                        ? 'bg-red-600 text-white'
+                        : 'bg-blue-600 text-white'
+                    }`}>
+                      {bookmark.source === 'live' ? '🔴 Live' : '📼 Historical'}
+                    </span>
+                  )}
                 </div>
 
                 {/* Duration Badge */}
                 <div className="absolute top-2 right-2" style={{ zIndex: 10 }}>
                   <span className="px-2 py-1 bg-black bg-opacity-75 text-white rounded-md text-xs font-medium">
-                    {bookmark.duration}s
+                    {bookmark.duration_seconds}s
                   </span>
                 </div>
               </div>
 
               {/* Metadata */}
               <div className="p-3 space-y-2">
-                {/* Device Name */}
-                <h3 className="font-medium text-gray-900 text-sm truncate" title={bookmark.device_name}>
-                  {bookmark.device_name || 'Unknown Device'}
-                </h3>
+                {/* Event Type Badge */}
+                {bookmark.event_type && (
+                  <div className="flex gap-1">
+                    <span className="px-2 py-0.5 bg-gray-100 text-gray-800 text-xs rounded-md font-medium">
+                      {bookmark.event_type}
+                    </span>
+                  </div>
+                )}
 
                 {/* Label - Editable */}
                 {editingId === bookmark.id ? (
-                  <div className="flex gap-1">
+                  <div className="space-y-2">
                     <input
                       type="text"
                       value={editLabel}
                       onChange={(e) => setEditLabel(e.target.value)}
-                      className="flex-1 px-2 py-1 text-xs border border-blue-500 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      className="w-full px-2 py-1 text-xs border border-blue-500 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
                       placeholder="Add label..."
                       autoFocus
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
-                          handleUpdateLabel(bookmark.id, editLabel);
+                          handleUpdateLabel(bookmark.id, editLabel, editTags);
                         } else if (e.key === 'Escape') {
                           setEditingId(null);
                         }
                       }}
                     />
-                    <button
-                      onClick={() => handleUpdateLabel(bookmark.id, editLabel)}
-                      className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
-                    >
-                      ✓
-                    </button>
-                    <button
-                      onClick={() => setEditingId(null)}
-                      className="px-2 py-1 bg-gray-300 text-gray-700 rounded text-xs hover:bg-gray-400"
-                    >
-                      ✕
-                    </button>
+                    {/* Tag Editor */}
+                    <div className="space-y-1">
+                      <div className="flex gap-1 flex-wrap">
+                        {editTags.map(tag => (
+                          <span key={tag} className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded-full flex items-center gap-1">
+                            {tag}
+                            <button onClick={() => removeTag(tag)} className="hover:text-red-600">×</button>
+                          </span>
+                        ))}
+                      </div>
+                      <div className="flex gap-1">
+                        <input
+                          type="text"
+                          value={newTag}
+                          onChange={(e) => setNewTag(e.target.value)}
+                          placeholder="Add tag..."
+                          className="flex-1 px-2 py-1 text-xs border border-gray-300 rounded"
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              addTag();
+                            }
+                          }}
+                        />
+                        <button
+                          onClick={addTag}
+                          className="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => handleUpdateLabel(bookmark.id, editLabel, editTags)}
+                        className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
+                      >
+                        ✓ Save
+                      </button>
+                      <button
+                        onClick={() => setEditingId(null)}
+                        className="px-2 py-1 bg-gray-300 text-gray-700 rounded text-xs hover:bg-gray-400"
+                      >
+                        ✕ Cancel
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div
@@ -300,6 +539,7 @@ export default function BookmarksPage() {
                     onClick={() => {
                       setEditingId(bookmark.id);
                       setEditLabel(bookmark.label || '');
+                      setEditTags(bookmark.tags || []);
                     }}
                     title={bookmark.label || 'Click to add label'}
                   >
@@ -307,7 +547,25 @@ export default function BookmarksPage() {
                   </div>
                 )}
 
-                {/* Timestamp and File Size */}
+                {/* Confidence Score (for AI-generated bookmarks) */}
+                {bookmark.source === 'ai_generated' && bookmark.confidence !== undefined && (
+                  <div className="text-xs text-gray-600">
+                    Confidence: <span className="font-medium">{Math.round(bookmark.confidence * 100)}%</span>
+                  </div>
+                )}
+
+                {/* Tags Display */}
+                {bookmark.tags && bookmark.tags.length > 0 && (
+                  <div className="flex gap-1 flex-wrap">
+                    {bookmark.tags.map(tag => (
+                      <span key={tag} className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded-full">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Timestamp */}
                 <div className="flex items-center gap-2 text-xs text-gray-500">
                   <svg className="w-3.5 h-3.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
@@ -319,9 +577,6 @@ export default function BookmarksPage() {
                       hour: '2-digit',
                       minute: '2-digit'
                     })}
-                  </span>
-                  <span className="ml-auto text-gray-400">
-                    {formatFileSize(bookmark.file_size)}
                   </span>
                 </div>
 
@@ -361,7 +616,7 @@ export default function BookmarksPage() {
       {viewingBookmark && (
         <div
           className="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-4"
-          onClick={() => setViewingBookmark(null)}
+          onClick={handleCloseModal}
         >
           <div
             className="relative max-w-4xl w-full bg-white rounded-lg overflow-hidden shadow-2xl"
@@ -370,40 +625,81 @@ export default function BookmarksPage() {
             {/* Header */}
             <div className="bg-gray-900 text-white px-6 py-4 flex items-center justify-between">
               <div className="flex-1">
-                <h3 className="font-medium text-lg">{viewingBookmark.device_name || 'Unknown Device'}</h3>
+                <h3 className="font-medium text-lg">Stream: {viewingBookmark.stream_id.substring(0, 8)}...</h3>
                 <div className="flex items-center gap-3 mt-1">
                   <p className="text-sm text-gray-300">{formatTimestamp(viewingBookmark.center_timestamp)}</p>
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                    viewingBookmark.source === 'live'
-                      ? 'bg-red-600 text-white'
-                      : 'bg-blue-600 text-white'
-                  }`}>
-                    {viewingBookmark.source === 'live' ? '🔴 Live' : '📼 Historical'}
-                  </span>
+                  {viewingBookmark.source === 'ai_generated' ? (
+                    <span className="px-2 py-0.5 rounded text-xs font-medium bg-purple-600 text-white">
+                      🤖 AI Generated
+                    </span>
+                  ) : (
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                      viewingBookmark.source === 'live'
+                        ? 'bg-red-600 text-white'
+                        : 'bg-blue-600 text-white'
+                    }`}>
+                      {viewingBookmark.source === 'live' ? '🔴 Live' : '📼 Historical'}
+                    </span>
+                  )}
+                  {viewingBookmark.event_type && (
+                    <span className="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 text-white">
+                      {viewingBookmark.event_type}
+                    </span>
+                  )}
                   <span className="text-xs text-gray-400">
-                    {viewingBookmark.duration}s • {formatFileSize(viewingBookmark.file_size)}
+                    {viewingBookmark.duration_seconds}s
                   </span>
+                  {viewingBookmark.confidence !== undefined && (
+                    <span className="text-xs text-gray-400">
+                      {Math.round(viewingBookmark.confidence * 100)}% confidence
+                    </span>
+                  )}
                 </div>
                 {viewingBookmark.label && (
                   <p className="text-sm text-gray-400 mt-1 italic">{viewingBookmark.label}</p>
                 )}
+                {viewingBookmark.tags && viewingBookmark.tags.length > 0 && (
+                  <div className="flex gap-1 flex-wrap mt-2">
+                    {viewingBookmark.tags.map(tag => (
+                      <span key={tag} className="px-2 py-0.5 bg-blue-600 text-white text-xs rounded-full">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-2">
-                {/* Download Button */}
-                <a
-                  href={`${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}${viewingBookmark.video_url}`}
-                  download={`bookmark-${viewingBookmark.device_name}-${new Date(viewingBookmark.center_timestamp).toISOString()}.mp4`}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-md transition-colors flex items-center gap-2"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                  </svg>
-                  Download
-                </a>
+                {/* Download Button - only show when video is available */}
+                {viewingBookmark.video_url && viewingBookmark.status === 'ready' && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDownload(viewingBookmark);
+                    }}
+                    disabled={downloadingId === viewingBookmark.id}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 rounded-md transition-colors flex items-center gap-2"
+                  >
+                    {downloadingId === viewingBookmark.id ? (
+                      <>
+                        <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Downloading...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                        Download
+                      </>
+                    )}
+                  </button>
+                )}
                 {/* Close Button */}
                 <button
-                  onClick={() => setViewingBookmark(null)}
+                  onClick={handleCloseModal}
                   className="text-gray-300 hover:text-white transition-colors p-2"
                   title="Close (ESC)"
                 >
@@ -416,15 +712,38 @@ export default function BookmarksPage() {
 
             {/* Video Player */}
             <div className="bg-black" style={{ aspectRatio: '16/9' }}>
-              <video
-                ref={videoRef}
-                controls
-                autoPlay
-                className="w-full h-full"
-                src={`${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}${viewingBookmark.video_url}`}
-              >
-                Your browser does not support the video tag.
-              </video>
+              {loadingVideo ? (
+                <div className="w-full h-full flex flex-col items-center justify-center text-white">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mb-4"></div>
+                  <span className="text-lg text-gray-400">Loading video...</span>
+                </div>
+              ) : videoUrl ? (
+                <video
+                  ref={videoRef}
+                  controls
+                  autoPlay
+                  className="w-full h-full"
+                  src={videoUrl}
+                >
+                  Your browser does not support the video tag.
+                </video>
+              ) : viewingBookmark.status === 'processing' ? (
+                <div className="w-full h-full flex flex-col items-center justify-center text-white">
+                  <svg className="w-16 h-16 text-gray-400 mb-4 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  <span className="text-lg text-gray-400">Video still processing...</span>
+                  <span className="text-sm text-gray-500 mt-2">Please wait and refresh the page</span>
+                </div>
+              ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center text-white">
+                  <svg className="w-16 h-16 text-red-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <span className="text-lg text-gray-400">Video not available</span>
+                  <span className="text-sm text-gray-500 mt-2">Status: {viewingBookmark.status || 'unknown'}</span>
+                </div>
+              )}
             </div>
           </div>
         </div>

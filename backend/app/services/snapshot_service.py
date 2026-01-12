@@ -1,5 +1,7 @@
 """
 Snapshot service for capturing frames from live and historical streams.
+
+V2 Version: Uses stream_id instead of device_id.
 """
 import os
 import asyncio
@@ -12,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from sqlalchemy.orm import selectinload
 from app.models.snapshot import Snapshot
+from app.models.stream import Stream
 from app.models.device import Device
 
 
@@ -25,7 +28,7 @@ class SnapshotService:
 
     async def capture_from_live_stream(
         self,
-        device_id: str,
+        stream_id: str,
         rtsp_url: str,
         db: AsyncSession
     ) -> Snapshot:
@@ -33,19 +36,19 @@ class SnapshotService:
         Capture a snapshot from a live RTSP stream.
 
         Args:
-            device_id: Device UUID
+            stream_id: Stream UUID
             rtsp_url: RTSP stream URL
-            db: Database session
+            db: AsyncSession
 
         Returns:
             Snapshot object with captured image
         """
         timestamp = datetime.now()
-        device_dir = os.path.join(self.snapshot_base_dir, device_id)
-        os.makedirs(device_dir, exist_ok=True)
+        stream_dir = os.path.join(self.snapshot_base_dir, stream_id)
+        os.makedirs(stream_dir, exist_ok=True)
 
         filename = f"live_{timestamp.strftime('%Y%m%d_%H%M%S')}.jpg"
-        file_path = os.path.join(device_dir, filename)
+        file_path = os.path.join(stream_dir, filename)
 
         logger.info(f"Capturing live snapshot from {rtsp_url} -> {file_path}")
 
@@ -94,7 +97,7 @@ class SnapshotService:
 
             # Create database entry
             snapshot = Snapshot(
-                device_id=device_id,
+                stream_id=stream_id,
                 file_path=file_path,
                 timestamp=timestamp,
                 format="jpg",
@@ -117,7 +120,7 @@ class SnapshotService:
 
     async def capture_from_historical(
         self,
-        device_id: str,
+        stream_id: str,
         timestamp: datetime,
         db: AsyncSession
     ) -> Snapshot:
@@ -125,15 +128,23 @@ class SnapshotService:
         Capture a snapshot from historical recordings.
 
         Args:
-            device_id: Device UUID
+            stream_id: Stream UUID
             timestamp: Timestamp to capture from (currently just uses latest segment)
-            db: Database session
+            db: AsyncSession
 
         Returns:
             Snapshot object with captured image
         """
+        # Get stream to find device/camera
+        stream_query = select(Stream).where(Stream.id == stream_id)
+        stream_result = await db.execute(stream_query)
+        stream = stream_result.scalar_one_or_none()
+
+        if not stream:
+            raise ValueError(f"Stream {stream_id} not found")
+
         # Find the recording segment for this timestamp
-        recording_base = f"/recordings/hot/{device_id}"
+        recording_base = f"/recordings/hot/{stream.camera_id}"
 
         # For simplicity, use today's date (we can enhance this later to use the actual timestamp)
         now = datetime.now()
@@ -158,11 +169,11 @@ class SnapshotService:
             raise FileNotFoundError(f"Failed to find recording segments: {e}")
 
         # Create snapshot directory
-        device_dir = os.path.join(self.snapshot_base_dir, device_id)
-        os.makedirs(device_dir, exist_ok=True)
+        stream_dir = os.path.join(self.snapshot_base_dir, stream_id)
+        os.makedirs(stream_dir, exist_ok=True)
 
         filename = f"historical_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
-        file_path = os.path.join(device_dir, filename)
+        file_path = os.path.join(stream_dir, filename)
 
         logger.info(f"Capturing historical snapshot from {segment_path} -> {file_path}")
 
@@ -208,7 +219,7 @@ class SnapshotService:
 
             # Create database entry
             snapshot = Snapshot(
-                device_id=device_id,
+                stream_id=stream_id,
                 file_path=file_path,
                 timestamp=now,  # Current time as capture time
                 format="jpg",
@@ -231,15 +242,15 @@ class SnapshotService:
     async def list_snapshots(
         self,
         db: AsyncSession,
-        device_id: Optional[str] = None,
+        stream_id: Optional[str] = None,
         limit: int = 100
     ) -> List[Snapshot]:
         """
-        List snapshots, optionally filtered by device.
+        List snapshots, optionally filtered by stream.
 
         Args:
             db: Database session
-            device_id: Optional device ID filter
+            stream_id: Optional stream ID filter
             limit: Maximum number of snapshots to return
 
         Returns:
@@ -247,8 +258,8 @@ class SnapshotService:
         """
         query = select(Snapshot)
 
-        if device_id:
-            query = query.filter(Snapshot.device_id == device_id)
+        if stream_id:
+            query = query.filter(Snapshot.stream_id == stream_id)
 
         query = query.order_by(Snapshot.created_at.desc()).limit(limit)
         result = await db.execute(query)

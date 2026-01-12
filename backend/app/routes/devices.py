@@ -3,13 +3,16 @@ Device management API routes.
 """
 import asyncio
 import os
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from typing import List
 from uuid import UUID
 
 from database import get_db
 from app.models import Device
+from app.models.stream import Stream, StreamState
 from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceResponse
 
 router = APIRouter(prefix="/api/v1/devices", tags=["devices"])
@@ -265,8 +268,48 @@ async def start_device_stream(
         
         # Update device as active
         device.is_active = True
+
+        # Create or update V2 Stream record for snapshot/bookmark support
+        # Check if stream already exists for this device
+        stream_query = select(Stream).where(Stream.camera_id == device_id)
+        stream_result = await db.execute(stream_query)
+        v2_stream = stream_result.scalar_one_or_none()
+
+        if v2_stream:
+            # Update existing stream to LIVE state
+            v2_stream.state = StreamState.LIVE
+            v2_stream.stream_metadata = {
+                "transport_id": transport_id,
+                "producer_id": video_producer["id"],
+                "ssrc": detected_ssrc,
+                "started_at": datetime.now(timezone.utc).isoformat()
+            }
+            logger.info(f"Updated V2 Stream {v2_stream.id} to LIVE state")
+        else:
+            # Create new V2 Stream record
+            v2_stream = Stream(
+                camera_id=device_id,
+                name=device.name or f"Stream-{device_id}",
+                state=StreamState.LIVE,
+                codec_config={
+                    "video": {
+                        "codec": "H264",
+                        "profile": "42e01f",
+                        "payloadType": 96
+                    }
+                },
+                stream_metadata={
+                    "transport_id": transport_id,
+                    "producer_id": video_producer["id"],
+                    "ssrc": detected_ssrc,
+                    "started_at": datetime.now(timezone.utc).isoformat()
+                }
+            )
+            db.add(v2_stream)
+            logger.info(f"Created V2 Stream for device {device_id}")
+
         await db.commit()
-        
+
         return {
             "status": "success",
             "device_id": str(device_id),
@@ -275,16 +318,84 @@ async def start_device_stream(
             "producers": {
                 "video": video_producer["id"]
             },
-            "stream": stream_info
+            "stream": stream_info,
+            "v2_stream_id": str(v2_stream.id)  # Include V2 stream ID in response
         }
         
+    except HTTPException:
+        # Re-raise HTTP exceptions (they already have proper status codes)
+        raise
+    except ConnectionRefusedError as e:
+        logger.error(f"MediaSoup connection refused: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error_code": "MEDIASOUP_UNAVAILABLE",
+                "message": "MediaSoup server is not available. Please check if the MediaSoup service is running.",
+                "detail": str(e)
+            }
+        )
+    except TimeoutError as e:
+        logger.error(f"RTSP timeout: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "error_code": "RTSP_TIMEOUT",
+                "message": "RTSP connection timed out. Please verify the RTSP URL and network connectivity.",
+                "detail": str(e)
+            }
+        )
     except Exception as e:
+        error_str = str(e).lower()
         logger.error(f"Failed to start device stream: {e}")
         logger.exception(e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to start stream: {str(e)}"
-        )
+
+        # Categorize common errors
+        if "ssrc" in error_str or "capture" in error_str:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "error_code": "SSRC_CAPTURE_FAILED",
+                    "message": "Failed to capture SSRC from RTSP source. The stream may not be producing video.",
+                    "detail": str(e)
+                }
+            )
+        elif "rtsp" in error_str or "connection" in error_str:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "error_code": "RTSP_CONNECTION_FAILED",
+                    "message": "Failed to connect to RTSP stream. Please verify the RTSP URL.",
+                    "detail": str(e)
+                }
+            )
+        elif "transport" in error_str or "mediasoup" in error_str:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error_code": "MEDIASOUP_ERROR",
+                    "message": "MediaSoup encountered an error. Please try again.",
+                    "detail": str(e)
+                }
+            )
+        elif "ffmpeg" in error_str:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error_code": "FFMPEG_ERROR",
+                    "message": "FFmpeg failed to process the stream.",
+                    "detail": str(e)
+                }
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error_code": "STREAM_START_FAILED",
+                    "message": "An unexpected error occurred while starting the stream.",
+                    "detail": str(e)
+                }
+            )
 
 
 @router.post("/{device_id}/stop-stream")
@@ -312,22 +423,37 @@ async def stop_device_stream(
     # Stop RTSP stream
     try:
         stopped = await rtsp_pipeline.stop_stream(str(device_id))
-        
+
         if stopped:
             # Update device as inactive
             device.is_active = False
+
+            # Update V2 Stream state to STOPPED
+            stream_query = select(Stream).where(Stream.camera_id == device_id)
+            stream_result = await db.execute(stream_query)
+            v2_stream = stream_result.scalar_one_or_none()
+            if v2_stream:
+                v2_stream.state = StreamState.STOPPED
+                logger.info(f"Updated V2 Stream {v2_stream.id} to STOPPED state")
+
             await db.commit()
-        
+
         return {
             "status": "success",
             "device_id": str(device_id),
             "stopped": stopped
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to stop device stream: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to stop stream: {str(e)}"
+            detail={
+                "error_code": "STREAM_STOP_FAILED",
+                "message": "Failed to stop stream",
+                "detail": str(e)
+            }
         )
 
 

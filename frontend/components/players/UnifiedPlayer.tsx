@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from 'react';
 import MediaSoupPlayer from './MediaSoupPlayer';
 import dynamic from 'next/dynamic';
+import { API_URL } from '@/lib/api-v2';
+import { getHeaders } from '@/lib/api';
 
 const HLSPlayer = dynamic(() => import('./HLSPlayer'), { ssr: false });
 
@@ -43,7 +45,8 @@ export default function UnifiedPlayer({ deviceId, deviceName, shouldConnect = fa
     const fetchTimeline = async () => {
       try {
         const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/recordings/devices/${deviceId}/dates`
+          `${API_URL}/api/v1/recordings/devices/${deviceId}/dates`,
+          { headers: getHeaders() }
         );
         const data = await response.json();
 
@@ -184,18 +187,18 @@ export default function UnifiedPlayer({ deviceId, deviceName, shouldConnect = fa
           <div className="w-full h-full">
             <MediaSoupPlayer
               roomId={deviceId}
-              mediasoupUrl="ws://10.30.250.245:8080/ws/mediasoup"
+              mediasoupUrl={`${API_URL.replace('http', 'ws')}/ws/mediasoup`}
               shouldConnect={shouldConnect}
             />
           </div>
         ) : (
           <div className="w-full h-full">
             <HLSPlayer
-              streamUrl={`${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/recordings/devices/${deviceId}/playlist${
+              streamUrl={`${API_URL}/api/v1/recordings/devices/${deviceId}/playlist${
                 selectedDate ? `?date=${selectedDate}&start_time=${startTime}:00&end_time=${endTime}:59` : ''
               }`}
               deviceName={deviceName}
-              seekToTime={hlsTargetTime || undefined}
+              deviceId={deviceId}
             />
           </div>
         )}

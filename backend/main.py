@@ -25,21 +25,88 @@ from app.middleware.auth import api_key_middleware
 # Initialize logging
 logger = setup_logging()
 
+# Default client credentials - used for frontend and API access
+# These are well-known credentials for development/testing
+# In production, use environment variables
+DEFAULT_CLIENT_ID = os.getenv("VAS_DEFAULT_CLIENT_ID", "vas-portal")
+DEFAULT_CLIENT_SECRET = os.getenv("VAS_DEFAULT_CLIENT_SECRET", "vas-portal-secret-2024")
+DEFAULT_SCOPES = [
+    "streams:read",
+    "streams:consume",
+    "bookmarks:read",
+    "bookmarks:write",
+    "snapshots:read",
+    "snapshots:write"
+]
+
+
+async def seed_default_client():
+    """Create or update default API client."""
+    from database import AsyncSessionLocal
+    from app.models.auth import JWTToken
+    from sqlalchemy import select
+    import hashlib
+
+    async with AsyncSessionLocal() as db:
+        try:
+            # Check if default client exists
+            result = await db.execute(
+                select(JWTToken).filter(JWTToken.client_id == DEFAULT_CLIENT_ID)
+            )
+            existing = result.scalars().first()
+            secret_hash = hashlib.sha256(DEFAULT_CLIENT_SECRET.encode()).hexdigest()
+
+            if not existing:
+                # Create the default client with known credentials
+                jwt_token = JWTToken(
+                    client_id=DEFAULT_CLIENT_ID,
+                    client_secret_hash=secret_hash,
+                    scopes=DEFAULT_SCOPES,
+                    is_active=True
+                )
+
+                db.add(jwt_token)
+                await db.commit()
+
+                logger.info(f"✅ Created default API client: {DEFAULT_CLIENT_ID}")
+                logger.info(f"   Client ID: {DEFAULT_CLIENT_ID}")
+                logger.info(f"   Client Secret: {DEFAULT_CLIENT_SECRET}")
+            elif existing.client_secret_hash != secret_hash:
+                # Update the secret to match the expected value
+                existing.client_secret_hash = secret_hash
+                existing.scopes = DEFAULT_SCOPES
+                existing.is_active = True
+                await db.commit()
+                logger.info(f"✅ Updated default API client secret: {DEFAULT_CLIENT_ID}")
+                logger.info(f"   Client ID: {DEFAULT_CLIENT_ID}")
+                logger.info(f"   Client Secret: {DEFAULT_CLIENT_SECRET}")
+            else:
+                logger.info(f"✅ Default API client already exists: {DEFAULT_CLIENT_ID}")
+
+        except Exception as e:
+            logger.error(f"Failed to seed default client: {e}")
+            await db.rollback()
+
+
 # Lifespan context manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan events for application startup and shutdown."""
     logger.info("Starting VAS Backend Application...")
-    
+
     # Create database tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    
+
     logger.info("Database tables created/verified")
+
+    # Seed default client for frontend/API access
+    await seed_default_client()
+
     logger.info("VAS Backend Application started successfully")
-    
+
     yield
-    
+
     logger.info("Shutting down VAS Backend Application...")
     await engine.dispose()
 
@@ -51,13 +118,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware
+# CORS middleware - configured for frontend at port 3200
+# Allow all origins for now to simplify debugging
+# TODO: Restrict to specific origins in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=["*"],
+    allow_credentials=False,  # Must be False when allow_origins=["*"]
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["Content-Length", "X-Request-Id"],
+    max_age=600,  # Cache preflight response for 10 minutes
 )
 
 # API Key authentication middleware
@@ -82,14 +153,25 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle validation errors."""
-    logger.error(f"Validation error: {exc.errors()}")
+    # Convert errors to JSON-serializable format (handle bytes)
+    errors = []
+    for error in exc.errors():
+        err_dict = {}
+        for key, value in error.items():
+            if isinstance(value, bytes):
+                err_dict[key] = value.decode('utf-8', errors='replace')
+            else:
+                err_dict[key] = value
+        errors.append(err_dict)
+
+    logger.error(f"Validation error: {errors}")
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
             "error": {
                 "status": status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "message": "Validation error",
-                "details": exc.errors(),
+                "details": errors,
                 "path": str(request.url)
             }
         }
@@ -153,11 +235,18 @@ async def root():
     return {
         "message": "Video Aggregation Service (VAS) API",
         "version": "1.0.0",
+        "v2_api": {
+            "base_url": "/v2",
+            "authentication": "/v2/auth/token",
+            "streams": "/v2/streams",
+            "bookmarks": "/v2/bookmarks",
+            "snapshots": "/v2/snapshots"
+        },
         "docs": "/docs",
         "health": "/health"
     }
 
-# API routes
+# API routes - V1 (existing)
 from app.routes import devices, streams, mediasoup, rtsp_pipeline, recordings, websocket, snapshots, bookmarks, api_keys, ruth_ai_compat
 
 app.include_router(devices.router)
@@ -170,6 +259,10 @@ app.include_router(snapshots.router)
 app.include_router(bookmarks.router)
 app.include_router(api_keys.router)
 app.include_router(ruth_ai_compat.router)
+
+# API routes - V2 (new)
+from app.api.v2 import v2_router
+app.include_router(v2_router)
 
 # Add routes for HLS streaming (without api/v1 prefix for convenience)
 from fastapi.responses import FileResponse

@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from 'react';
-import { captureBookmarkHistorical } from '@/lib/api';
+import { captureBookmarkHistorical, getHeaders } from '@/lib/api';
+import { API_URL } from '@/lib/api-v2';
 
 interface HLSPlayerProps {
   streamUrl: string;
@@ -49,10 +50,10 @@ const HLSPlayer = forwardRef<HLSPlayerRef, HLSPlayerProps>(
       const timestamp = new Date(Date.now() - (secondsBehind * 1000)).toISOString();
 
       const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://10.30.250.245:8080'}/api/v1/snapshots/devices/${deviceId}/capture/historical`,
+        `${API_URL}/api/v1/snapshots/devices/${deviceId}/capture/historical`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getHeaders('application/json'),
           body: JSON.stringify({ timestamp }),
         }
       );

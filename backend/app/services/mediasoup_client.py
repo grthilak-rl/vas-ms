@@ -263,6 +263,9 @@ class MediaSoupClient:
             logger.info("Disconnected from MediaSoup server")
 
 
+import os
+
 # Global MediaSoup client instance
-mediasoup_client = MediaSoupClient()
+_mediasoup_url = os.getenv("MEDIASOUP_URL", "ws://localhost:3001")
+mediasoup_client = MediaSoupClient(_mediasoup_url)
 
